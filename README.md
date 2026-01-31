@@ -99,7 +99,7 @@ This tool currently works on macOS and Linux (_hopefully_). I might add support 
 
 ## Future Plans
 
-Right now this is just a packet sniffer that dumps HTTP traffic to your terminal. The plan is to build this into a GUI tool (like ngrok has) for better packet inspection and analysis.
+Add more filtering options, and potentially multiple port monitoring.
 
 ## Contributions
 
