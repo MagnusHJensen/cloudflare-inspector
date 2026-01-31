@@ -32,22 +32,9 @@ jobs:
             -ldflags="-X main.version=${{ github.ref_name }} -X main.commit=${{ github.sha }} -X main.date=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
             -o cloudflare-inspector-darwin-arm64 .
 
-      - name: Upload AMD64 binary to release
-        uses: actions/upload-release-asset@v1
+      - name: Upload Release Assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./cloudflare-inspector-darwin-amd64
-          asset_name: cloudflare-inspector-darwin-amd64
-          asset_content_type: application/octet-stream
-
-      - name: Upload ARM64 binary to release
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./cloudflare-inspector-darwin-arm64
-          asset_name: cloudflare-inspector-darwin-arm64
-          asset_content_type: application/octet-stream
+        run:
+          gh release upload "${{ github.ref_name}}" ./cloudflare-inspector-darwin-amd64 ./
+          cloudflare-inspector-darwin-arm64 --clobber
