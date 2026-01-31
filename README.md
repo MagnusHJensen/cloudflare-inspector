@@ -8,19 +8,19 @@ I made this tool to help debug Cloudflare Tunnels by inspecting the HTTP traffic
 
 ## Installation
 
-Download the latest release for your platform from the [releases page](https://github.com/yourusername/cloudflare-inspector/releases).
+Download the latest release for your platform from the [releases page](https://github.com/magnushjensen/cloudflare-inspector/releases).
 
 ### macOS Intel (x86_64)
 
 ```bash
-curl -L https://github.com/yourusername/cloudflare-inspector/releases/latest/download/cloudflare-inspector-darwin-amd64 -o cloudflare-inspector
+curl -L https://github.com/magnushjensen/cloudflare-inspector/releases/latest/download/cloudflare-inspector-darwin-amd64 -o cloudflare-inspector
 chmod +x cloudflare-inspector
 ```
 
 ### macOS Apple Silicon (ARM64)
 
 ````bash
-curl -L https://github.com/yourusername/cloudflare-inspector/releases/latest/download/cloudflare-inspector-darwin-arm64 -o cloudflare-inspector
+curl -L https://github.com/magnushjensen/cloudflare-inspector/releases/latest/download/cloudflare-inspector-darwin-arm64 -o cloudflare-inspector
 chmod +x cloudflare-inspector
 
 ## Usage
