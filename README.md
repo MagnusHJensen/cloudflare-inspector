@@ -19,9 +19,10 @@ chmod +x cloudflare-inspector
 
 ### macOS Apple Silicon (ARM64)
 
-````bash
+```bash
 curl -L https://github.com/magnushjensen/cloudflare-inspector/releases/latest/download/cloudflare-inspector-darwin-arm64 -o cloudflare-inspector
 chmod +x cloudflare-inspector
+```
 
 ## Usage
 
