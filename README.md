@@ -95,7 +95,7 @@ You need `sudo` because the tool captures network packets directly from your sys
 
 ## Platform Support
 
-This tool currently works on **macOS only**. I might add support for Linux and Windows later.
+This tool currently works on macOS and Linux (_hopefully_). I might add support for Windows later.
 
 ## Future Plans
 
