@@ -22,6 +22,7 @@ type httpStreamFactory struct{}
 type httpStream struct {
 	net, transport gopacket.Flow
 	r              tcpreader.ReaderStream
+	seq            int // sequence number to distinguish multiple request/response pairs on the same connection
 }
 
 func (h *httpStreamFactory) New(net, transport gopacket.Flow) tcpassembly.Stream {
@@ -39,29 +40,30 @@ func (h *httpStreamFactory) New(net, transport gopacket.Flow) tcpassembly.Stream
 func (h *httpStream) run() {
 	buf := bufio.NewReader(&h.r)
 	for {
-		// Peek at the first line to determine if it's a request or response
-		line, _, err := buf.ReadLine()
+		// Peek at first bytes to determine if this is a request, response, or junk.
+		// Using Peek (not ReadLine) so we don't consume data — then we pass buf
+		// directly to ReadRequest/ReadResponse, avoiding nested bufio.Readers
+		// which silently lose read-ahead data between messages.
+		peeked, err := buf.Peek(8)
 		if err == io.EOF {
 			return
-		} else if err != nil {
-			log.Println("Error reading stream", h.net, h.transport, ":", err)
+		}
+		if err != nil {
+			// Not enough data to peek 8 bytes but not EOF — try to skip past junk
+			buf.ReadByte()
 			continue
 		}
 
-		lineStr := string(line)
+		peekStr := string(peeked)
 
-		// Check if it's an HTTP request (starts with method)
-		if h.isHTTPRequest(lineStr) {
-			// Put the line back and read as request
-			fullLine := lineStr + "\r\n"
-			reader := io.MultiReader(strings.NewReader(fullLine), buf)
-			req, err := http.ReadRequest(bufio.NewReader(reader))
+		if h.isHTTPRequest(peekStr) {
+			req, err := http.ReadRequest(buf)
 			if err != nil {
 				log.Println("Error reading request", h.net, h.transport, ":", err)
+				buf.ReadByte()
 				continue
 			}
 
-			// Read the actual body content
 			bodyBytes, err := io.ReadAll(req.Body)
 			if err != nil {
 				log.Println("Error reading request body", h.net, h.transport, ":", err)
@@ -69,18 +71,16 @@ func (h *httpStream) run() {
 			}
 			req.Body.Close()
 
+			h.seq++
 			h.logRequest(req, bodyBytes)
-		} else if h.isHTTPResponse(lineStr) {
-			// Put the line back and read as response
-			fullLine := lineStr + "\r\n"
-			reader := io.MultiReader(strings.NewReader(fullLine), buf)
-			resp, err := http.ReadResponse(bufio.NewReader(reader), nil)
+		} else if h.isHTTPResponse(peekStr) {
+			resp, err := http.ReadResponse(buf, nil)
 			if err != nil {
 				log.Println("Error reading response", h.net, h.transport, ":", err)
+				buf.ReadByte()
 				continue
 			}
 
-			// Read the actual body content
 			bodyBytes, err := io.ReadAll(resp.Body)
 			if err != nil {
 				log.Println("Error reading response body", h.net, h.transport, ":", err)
@@ -88,10 +88,11 @@ func (h *httpStream) run() {
 			}
 			resp.Body.Close()
 
+			h.seq++
 			h.logResponse(resp, bodyBytes)
 		} else {
-			// Skip unknown data
-			continue
+			// Skip one byte of non-HTTP data and try again
+			buf.ReadByte()
 		}
 	}
 }
@@ -150,8 +151,9 @@ func (h *httpStream) logRequest(req *http.Request, bodyBytes []byte) {
 		headers[key] = strings.Join(values, ", ")
 	}
 
-	// PairKey uses client:port-server:port to correlate request/response
-	pairKey := fmt.Sprintf("%s:%s-%s:%s", h.net.Src(), h.transport.Src(), h.net.Dst(), h.transport.Dst())
+	// PairKey uses client:port-server:port-seq to correlate request/response.
+	// The seq number distinguishes multiple pairs on the same keep-alive connection.
+	pairKey := fmt.Sprintf("%s:%s-%s:%s-n%d", h.net.Src(), h.transport.Src(), h.net.Dst(), h.transport.Dst(), h.seq)
 
 	Store.Add(CapturedPacket{
 		Type:        PacketRequest,
@@ -206,8 +208,8 @@ func (h *httpStream) logResponse(resp *http.Response, bodyBytes []byte) {
 		headers[key] = strings.Join(values, ", ")
 	}
 
-	// PairKey uses client:port-server:port to correlate request/response (same as request)
-	pairKey := fmt.Sprintf("%s:%s-%s:%s", h.net.Dst(), h.transport.Dst(), h.net.Src(), h.transport.Src())
+	// PairKey uses client:port-server:port-seq to correlate request/response (same as request).
+	pairKey := fmt.Sprintf("%s:%s-%s:%s-n%d", h.net.Dst(), h.transport.Dst(), h.net.Src(), h.transport.Src(), h.seq)
 
 	Store.Add(CapturedPacket{
 		Type:        PacketResponse,
