@@ -96,6 +96,8 @@ const dashboardHTML = `<!DOCTYPE html>
         .method.PUT { color: #fa7; }
         .method.DELETE { color: #f77; }
         .method.PATCH { color: #c9f; }
+        .method.TLS { color: #c97; }
+        .method.RAW { color: #888; }
         .status {
             font-size: 11px;
         }

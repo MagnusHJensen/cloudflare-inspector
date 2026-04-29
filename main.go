@@ -69,7 +69,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	streamFactory := &httpStreamFactory{}
+	streamFactory := &httpStreamFactory{capturePort: *port}
 	pool := tcpassembly.NewStreamPool(streamFactory)
 	assembler := tcpassembly.NewAssembler(pool)
 
