@@ -29,6 +29,27 @@ func tlsTaintKey(clientNet, clientPort, serverNet, serverPort string) string {
 	return clientNet + ":" + clientPort + "-" + serverNet + ":" + serverPort
 }
 
+// pendingMethods is a per-connection FIFO of request methods. The request
+// stream pushes a method after parsing each request, and the response stream
+// pops it before parsing the matching response. http.ReadResponse needs the
+// request method (notably HEAD) to know whether a body should be read — without
+// it, HEAD responses cause the parser to consume bytes from the next response.
+var (
+	pendingMethodsMu sync.Mutex
+	pendingMethods   = make(map[string]chan string)
+)
+
+func methodChanFor(key string) chan string {
+	pendingMethodsMu.Lock()
+	defer pendingMethodsMu.Unlock()
+	ch, ok := pendingMethods[key]
+	if !ok {
+		ch = make(chan string, 64)
+		pendingMethods[key] = ch
+	}
+	return ch
+}
+
 // httpStreamFactory implements tcpassembly.StreamFactory
 type httpStreamFactory struct {
 	capturePort int
@@ -90,11 +111,16 @@ func (h *httpStream) run() {
 			}
 			req.Body.Close()
 
+			// Hand the method to the response stream so it can correctly parse
+			// the matching response (HEAD responses have Content-Length but no body).
+			h.pushMethod(req.Method)
+
 			h.seq++
 			h.junkLogged = false
 			h.logRequest(req, bodyBytes)
 		} else if h.isHTTPResponse(peekStr) {
-			resp, err := http.ReadResponse(buf, nil)
+			pairedReq := h.popMethodAsRequest()
+			resp, err := http.ReadResponse(buf, pairedReq)
 			if err != nil {
 				log.Println("Error reading response", h.net, h.transport, ":", err)
 				buf.ReadByte()
@@ -193,6 +219,43 @@ func (h *httpStream) isResponseToTaintedConnection() bool {
 	tlsTaintedMu.Lock()
 	defer tlsTaintedMu.Unlock()
 	return tlsTainted[key]
+}
+
+// pushMethod is called by the request stream after parsing each request, so the
+// peer response stream can pop it before parsing the matching response.
+func (h *httpStream) pushMethod(method string) {
+	key := tlsTaintKey(h.net.Src().String(), h.transport.Src().String(), h.net.Dst().String(), h.transport.Dst().String())
+	ch := methodChanFor(key)
+	select {
+	case ch <- method:
+	default:
+		// Channel full — pipeline is deeper than expected. Drop oldest.
+		select {
+		case <-ch:
+		default:
+		}
+		select {
+		case ch <- method:
+		default:
+		}
+	}
+}
+
+// popMethodAsRequest waits briefly for the request stream to publish a method
+// for the connection, then returns a stub *http.Request carrying it. Returns
+// nil if no method arrives in time, in which case ReadResponse falls back to
+// Content-Length-driven parsing.
+func (h *httpStream) popMethodAsRequest() *http.Request {
+	// From the response stream's perspective, src is the server and dst is the
+	// client; reverse to the request stream's canonical key.
+	key := tlsTaintKey(h.net.Dst().String(), h.transport.Dst().String(), h.net.Src().String(), h.transport.Src().String())
+	ch := methodChanFor(key)
+	select {
+	case method := <-ch:
+		return &http.Request{Method: method}
+	case <-time.After(200 * time.Millisecond):
+		return nil
+	}
 }
 
 // logUnparseable synthesizes a request entry for non-HTTP bytes (e.g. a TLS
