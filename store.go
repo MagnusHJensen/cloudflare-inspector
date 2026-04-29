@@ -76,27 +76,27 @@ func (s *PacketStore) Add(p CapturedPacket) {
 
 	s.packets = append(s.packets, p)
 
-	// Track request/response pairs
+	// Track request/response pairs. A PairKey collision where the matching
+	// slot is already filled means we're seeing a new req/res on a reused
+	// 4-tuple (e.g. localhost connection churn resets per-stream seq to 0) —
+	// start a fresh pair instead of overwriting and losing the prior packet.
 	if p.PairKey != "" {
-		if pair, exists := s.pairs[p.PairKey]; exists {
-			if p.Type == PacketRequest {
-				pair.Request = &p
-			} else {
-				pair.Response = &p
-			}
-		} else {
-			pair := &PacketPair{
+		pair, exists := s.pairs[p.PairKey]
+		slotOccupied := exists && ((p.Type == PacketRequest && pair.Request != nil) ||
+			(p.Type == PacketResponse && pair.Response != nil))
+		if !exists || slotOccupied {
+			pair = &PacketPair{
 				ID:        s.nextPair,
 				Timestamp: p.Timestamp,
 			}
 			s.nextPair++
-			if p.Type == PacketRequest {
-				pair.Request = &p
-			} else {
-				pair.Response = &p
-			}
 			s.pairs[p.PairKey] = pair
 			s.pairList = append(s.pairList, pair)
+		}
+		if p.Type == PacketRequest {
+			pair.Request = &p
+		} else {
+			pair.Response = &p
 		}
 	}
 
@@ -107,12 +107,18 @@ func (s *PacketStore) Add(p CapturedPacket) {
 
 	// Trim old pairs
 	if len(s.pairList) > s.maxSize {
-		// Remove old pairs from map
+		// Remove old pairs from map — but only if the map still points to
+		// this exact pair. A newer pair with the same PairKey may have
+		// replaced it, and we must not evict that newer pair.
 		for _, oldPair := range s.pairList[:len(s.pairList)-s.maxSize] {
+			var key string
 			if oldPair.Request != nil {
-				delete(s.pairs, oldPair.Request.PairKey)
+				key = oldPair.Request.PairKey
 			} else if oldPair.Response != nil {
-				delete(s.pairs, oldPair.Response.PairKey)
+				key = oldPair.Response.PairKey
+			}
+			if mapped, ok := s.pairs[key]; ok && mapped == oldPair {
+				delete(s.pairs, key)
 			}
 		}
 		s.pairList = s.pairList[len(s.pairList)-s.maxSize:]

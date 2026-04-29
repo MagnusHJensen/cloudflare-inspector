@@ -6,6 +6,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httputil"
+	"net/textproto"
 	"slices"
 	"strconv"
 	"strings"
@@ -27,27 +29,6 @@ var (
 
 func tlsTaintKey(clientNet, clientPort, serverNet, serverPort string) string {
 	return clientNet + ":" + clientPort + "-" + serverNet + ":" + serverPort
-}
-
-// pendingMethods is a per-connection FIFO of request methods. The request
-// stream pushes a method after parsing each request, and the response stream
-// pops it before parsing the matching response. http.ReadResponse needs the
-// request method (notably HEAD) to know whether a body should be read — without
-// it, HEAD responses cause the parser to consume bytes from the next response.
-var (
-	pendingMethodsMu sync.Mutex
-	pendingMethods   = make(map[string]chan string)
-)
-
-func methodChanFor(key string) chan string {
-	pendingMethodsMu.Lock()
-	defer pendingMethodsMu.Unlock()
-	ch, ok := pendingMethods[key]
-	if !ok {
-		ch = make(chan string, 64)
-		pendingMethods[key] = ch
-	}
-	return ch
 }
 
 // httpStreamFactory implements tcpassembly.StreamFactory
@@ -111,28 +92,16 @@ func (h *httpStream) run() {
 			}
 			req.Body.Close()
 
-			// Hand the method to the response stream so it can correctly parse
-			// the matching response (HEAD responses have Content-Length but no body).
-			h.pushMethod(req.Method)
-
 			h.seq++
 			h.junkLogged = false
 			h.logRequest(req, bodyBytes)
 		} else if h.isHTTPResponse(peekStr) {
-			pairedReq := h.popMethodAsRequest()
-			resp, err := http.ReadResponse(buf, pairedReq)
+			resp, bodyBytes, err := parseResponseSafely(buf)
 			if err != nil {
 				log.Println("Error reading response", h.net, h.transport, ":", err)
 				buf.ReadByte()
 				continue
 			}
-
-			bodyBytes, err := io.ReadAll(resp.Body)
-			if err != nil {
-				log.Println("Error reading response body", h.net, h.transport, ":", err)
-				bodyBytes = []byte{}
-			}
-			resp.Body.Close()
 
 			h.seq++
 			h.junkLogged = false
@@ -221,41 +190,92 @@ func (h *httpStream) isResponseToTaintedConnection() bool {
 	return tlsTainted[key]
 }
 
-// pushMethod is called by the request stream after parsing each request, so the
-// peer response stream can pop it before parsing the matching response.
-func (h *httpStream) pushMethod(method string) {
-	key := tlsTaintKey(h.net.Src().String(), h.transport.Src().String(), h.net.Dst().String(), h.transport.Dst().String())
-	ch := methodChanFor(key)
-	select {
-	case ch <- method:
-	default:
-		// Channel full — pipeline is deeper than expected. Drop oldest.
-		select {
-		case <-ch:
-		default:
-		}
-		select {
-		case ch <- method:
-		default:
-		}
+// parseResponseSafely parses an HTTP response from buf. It handles HEAD
+// responses (which advertise Content-Length but send no body) by peeking after
+// the headers — if the next bytes look like another HTTP/x.y status line, the
+// response had no body. This avoids the cross-stream coordination dance that
+// http.ReadResponse would otherwise need to know whether the request was HEAD.
+func parseResponseSafely(buf *bufio.Reader) (*http.Response, []byte, error) {
+	tp := textproto.NewReader(buf)
+
+	statusLine, err := tp.ReadLine()
+	if err != nil {
+		return nil, nil, err
 	}
+	parts := strings.SplitN(statusLine, " ", 3)
+	if len(parts) < 2 || !strings.HasPrefix(parts[0], "HTTP/") {
+		return nil, nil, fmt.Errorf("malformed status line: %q", statusLine)
+	}
+	statusCode, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid status code in %q: %w", statusLine, err)
+	}
+	statusText := parts[1]
+	if len(parts) >= 3 {
+		statusText = parts[1] + " " + parts[2]
+	}
+
+	mimeHeader, err := tp.ReadMIMEHeader()
+	if err != nil {
+		return nil, nil, err
+	}
+	headers := http.Header(mimeHeader)
+
+	resp := &http.Response{
+		Proto:      parts[0],
+		StatusCode: statusCode,
+		Status:     statusText,
+		Header:     headers,
+	}
+
+	// Status codes that, per RFC, never have a body.
+	if statusCode < 200 || statusCode == 204 || statusCode == 304 {
+		return resp, nil, nil
+	}
+
+	// Chunked encoding: read chunks via stdlib helper.
+	if isChunked(headers.Get("Transfer-Encoding")) {
+		body, err := io.ReadAll(httputil.NewChunkedReader(buf))
+		if err != nil {
+			return resp, body, err
+		}
+		// httputil.NewChunkedReader stops at the 0-length chunk; consume the
+		// trailing CRLF (and any trailers) so the next response is at buf head.
+		_, _ = tp.ReadMIMEHeader()
+		return resp, body, nil
+	}
+
+	contentLengthStr := headers.Get("Content-Length")
+	if contentLengthStr == "" {
+		// No Content-Length and no chunked encoding: don't try to read a body —
+		// connection-close framed bodies aren't worth chasing for our use case.
+		return resp, nil, nil
+	}
+	contentLength, err := strconv.ParseInt(contentLengthStr, 10, 64)
+	if err != nil || contentLength <= 0 {
+		return resp, nil, nil
+	}
+
+	// HEAD detection: if the next bytes look like another HTTP status line,
+	// the server advertised a body but didn't actually send one (HEAD response).
+	if peeked, _ := buf.Peek(5); len(peeked) == 5 && string(peeked) == "HTTP/" {
+		return resp, nil, nil
+	}
+
+	body := make([]byte, contentLength)
+	if _, err := io.ReadFull(buf, body); err != nil {
+		return resp, body, err
+	}
+	return resp, body, nil
 }
 
-// popMethodAsRequest waits briefly for the request stream to publish a method
-// for the connection, then returns a stub *http.Request carrying it. Returns
-// nil if no method arrives in time, in which case ReadResponse falls back to
-// Content-Length-driven parsing.
-func (h *httpStream) popMethodAsRequest() *http.Request {
-	// From the response stream's perspective, src is the server and dst is the
-	// client; reverse to the request stream's canonical key.
-	key := tlsTaintKey(h.net.Dst().String(), h.transport.Dst().String(), h.net.Src().String(), h.transport.Src().String())
-	ch := methodChanFor(key)
-	select {
-	case method := <-ch:
-		return &http.Request{Method: method}
-	case <-time.After(200 * time.Millisecond):
-		return nil
+func isChunked(te string) bool {
+	for _, v := range strings.Split(te, ",") {
+		if strings.EqualFold(strings.TrimSpace(v), "chunked") {
+			return true
+		}
 	}
+	return false
 }
 
 // logUnparseable synthesizes a request entry for non-HTTP bytes (e.g. a TLS
