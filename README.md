@@ -19,9 +19,10 @@ chmod +x local-http-inspector
 
 ### macOS Apple Silicon (ARM64)
 
-````bash
+```bash
 curl -L https://github.com/magnushjensen/local-http-inspector/releases/latest/download/local-http-inspector-darwin-arm64 -o local-http-inspector
 chmod +x local-http-inspector
+```
 
 ## Usage
 
