@@ -134,6 +134,28 @@ const dashboardHTML = `<!DOCTYPE html>
             margin-bottom: 6px;
             letter-spacing: 0.5px;
         }
+        .detail-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 6px;
+        }
+        .detail-header .detail-title { margin-bottom: 0; }
+        .copy-btn {
+            background: #2a2a2a;
+            border: 1px solid #444;
+            color: #888;
+            font-family: inherit;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 2px 8px;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .copy-btn:hover { background: #333; color: #ccc; }
+        .copy-btn.copied { color: #7c7; border-color: #7c7; }
         .detail-content {
             font-size: 11px;
             background: #222;
@@ -242,7 +264,10 @@ Connection: {{.Connection}}</div>
                     </div>
                     {{if .Body}}
                     <div class="detail-section">
-                        <div class="detail-title">Body</div>
+                        <div class="detail-header">
+                            <div class="detail-title">Body</div>
+                            <button class="copy-btn" onclick="copyBody(this, event)">Copy</button>
+                        </div>
                         <div class="detail-content">{{.Body}}</div>
                     </div>
                     {{end}}
@@ -293,6 +318,56 @@ Connection: {{.Connection}}</div>
             return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
         }
 
+        function copyBody(btn, event) {
+            event.stopPropagation();
+            const section = btn.closest('.detail-section');
+            const content = section && section.querySelector('.detail-content');
+            if (!content) return;
+
+            const label = btn.textContent;
+            const done = () => {
+                btn.textContent = 'Copied';
+                btn.classList.add('copied');
+                setTimeout(() => {
+                    btn.textContent = label;
+                    btn.classList.remove('copied');
+                }, 1200);
+            };
+
+            const text = content.textContent;
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(done, () => fallbackCopy(text, done));
+            } else {
+                fallbackCopy(text, done);
+            }
+        }
+
+        function fallbackCopy(text, done) {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            try {
+                document.execCommand('copy');
+                done();
+            } catch (e) {
+                console.error('Copy failed:', e);
+            }
+            document.body.removeChild(ta);
+        }
+
+        function renderBody(p) {
+            if (!p.body) return '';
+            return '<div class="detail-section">' +
+                '<div class="detail-header">' +
+                '<div class="detail-title">Body (' + p.bodySize + ' bytes)</div>' +
+                '<button class="copy-btn" onclick="copyBody(this, event)">Copy</button>' +
+                '</div>' +
+                '<div class="detail-content">' + escapeHtml(p.body) + '</div></div>';
+        }
+
         function renderHeaders(headers) {
             return Object.entries(headers || {}).map(([k,v]) =>
                 '<div class="header-row"><span class="header-name">' + escapeHtml(k) + ':</span><span class="header-value">' + escapeHtml(v) + '</span></div>'
@@ -307,12 +382,12 @@ Connection: {{.Connection}}</div>
                 return '<div class="detail-section"><div class="detail-title">Request Info</div>' +
                     '<div class="detail-content">' + p.method + ' ' + escapeHtml(p.url) + ' ' + p.protocol + '\nHost: ' + escapeHtml(p.host) + '\nConnection: ' + escapeHtml(p.connection) + '</div></div>' +
                     '<div class="detail-section"><div class="detail-title">Headers</div><div class="headers-list">' + headersHtml + '</div></div>' +
-                    (p.body ? '<div class="detail-section"><div class="detail-title">Body (' + p.bodySize + ' bytes)</div><div class="detail-content">' + escapeHtml(p.body) + '</div></div>' : '');
+                    renderBody(p);
             } else {
                 return '<div class="detail-section"><div class="detail-title">Response Info</div>' +
                     '<div class="detail-content">' + p.protocol + ' ' + escapeHtml(p.status) + '\nConnection: ' + escapeHtml(p.connection) + '</div></div>' +
                     '<div class="detail-section"><div class="detail-title">Headers</div><div class="headers-list">' + headersHtml + '</div></div>' +
-                    (p.body ? '<div class="detail-section"><div class="detail-title">Body (' + p.bodySize + ' bytes)</div><div class="detail-content">' + escapeHtml(p.body) + '</div></div>' : '');
+                    renderBody(p);
             }
         }
 
